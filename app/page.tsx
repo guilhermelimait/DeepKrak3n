@@ -1,7 +1,7 @@
 "use client";
 
 import type React from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import { ChevronDown, Settings, Zap, RefreshCcw, Play, Download, Save, FileText, CheckCircle, X, Eye, ArrowUp } from "lucide-react";
 import { motion } from "framer-motion";
@@ -187,16 +187,26 @@ export default function Home() {
   const [showPreview, setShowPreview] = useState(false);
   const [previewHtml, setPreviewHtml] = useState("");
   const [availabilityCollapsed, setAvailabilityCollapsed] = useState(false);
+  const [profileCheckCollapsed, setProfileCheckCollapsed] = useState(false);
+  const [deepAnalysisCollapsed, setDeepAnalysisCollapsed] = useState(false);
+  const [llmCollapsed, setLlmCollapsed] = useState(false);
+  const [exportCollapsed, setExportCollapsed] = useState(false);
   const [mapZoom, setMapZoom] = useState(1);
   const searchStreamRef = useRef<EventSource | null>(null);
   const [showConnections, setShowConnections] = useState(true);
   const [connectBy, setConnectBy] = useState<"username" | "email" | "profile">("username");
-  const [branchMode, setBranchMode] = useState<"all" | "single-pack" | "sorted">("sorted");
+  const [branchMode, setBranchMode] = useState<"all" | "category">("all");
   const [showBackToTop, setShowBackToTop] = useState(false);
   const [mapPan, setMapPan] = useState({ x: 0, y: 0 });
   const panStateRef = useRef({ dragging: false, startX: 0, startY: 0, origX: 0, origY: 0 });
   const [isPanning, setIsPanning] = useState(false);
-  const [activeBranch, setActiveBranch] = useState<{ label: string; nodes: DeepProfileResult[]; basis?: { type: string; value: string; note: string } } | null>(null);
+  const [activeBranch, setActiveBranch] = useState<{
+    label: string;
+    nodes: DeepProfileResult[];
+    basis?: { type: string; value: string; note: string };
+    viewMode?: "all" | "category" | "likelihood";
+    category?: string | null;
+  } | null>(null);
 
   const isSearchInProgress = useMemo(() => isChecking || phases.availability === "running", [isChecking, phases.availability]);
 
@@ -208,6 +218,36 @@ export default function Home() {
   const hasInFlightResults = useMemo(
     () => isChecking || results.some((r) => r.checking || r.status === "checking"),
     [isChecking, results]
+  );
+
+  const categoryOrder = useMemo(() => Object.keys(platformCategories).map((c) => c.toLowerCase()), []);
+  const categoryRank = useMemo(() => {
+    const map = new Map<string, number>();
+    categoryOrder.forEach((cat, idx) => map.set(cat, idx));
+    return map;
+  }, [categoryOrder]);
+
+  const likelihoodScore = useCallback(
+    (p: { displayName?: string | null; bio?: string | null; url?: string | null }) => {
+      const uname = (username || "").toLowerCase();
+      const mail = (email || "").toLowerCase();
+      const display = (p.displayName || "").toLowerCase();
+      const bio = (p.bio || "").toLowerCase();
+      const url = (p.url || "").toLowerCase();
+      let score = 0;
+      if (uname) {
+        if (display.includes(uname)) score += 3;
+        if (bio.includes(uname)) score += 2;
+        if (url.includes(uname)) score += 2;
+      }
+      if (mail) {
+        if (display.includes(mail)) score += 3;
+        if (bio.includes(mail)) score += 3;
+        if (url.includes(mail)) score += 2;
+      }
+      return score;
+    },
+    [username, email]
   );
 
   useEffect(() => {
@@ -228,6 +268,7 @@ export default function Home() {
   }, [hasInFlightResults, results, foundDetails]);
 
   const deepSectionRef = useRef<HTMLDivElement | null>(null);
+  const deepAnalysisSectionRef = useRef<HTMLDivElement | null>(null);
   const analyzerSectionRef = useRef<HTMLDivElement | null>(null);
   const availabilitySectionRef = useRef<HTMLDivElement | null>(null);
   const exportSectionRef = useRef<HTMLDivElement | null>(null);
@@ -304,22 +345,53 @@ export default function Home() {
     }
   };
 
-  const saveSettings = () => {
+  const saveSettings = async () => {
     if (typeof window === "undefined") return;
+    setSavedMessage(null);
+    const payload = {
+      useLLM,
+      llmModel,
+      ollamaHost,
+      llmApiMode,
+      analyzerPrompt,
+    };
+
     try {
-      const payload = {
-        useLLM,
-        llmModel,
-        ollamaHost,
-        llmApiMode,
-        analyzerPrompt,
-      };
       localStorage.setItem(SETTINGS_KEY, JSON.stringify(payload));
-      setSavedMessage("Settings saved");
-      setTimeout(() => setSavedMessage(null), 2200);
     } catch (e) {
       console.error("save settings failed", e);
     }
+
+    let promptSaved = false;
+    let promptError: string | null = null;
+    const trimmed = analyzerPrompt.trim();
+    if (trimmed) {
+      try {
+        const res = await fetch(`${API_BASE}/api/prompt`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ prompt: trimmed }),
+        });
+        if (!res.ok) {
+          const detail = await res.json().catch(() => null);
+          promptError = detail?.detail || `HTTP ${res.status}`;
+        } else {
+          promptSaved = true;
+        }
+      } catch (err) {
+        promptError = (err as Error).message;
+        console.error("save prompt failed", err);
+      }
+    }
+
+    if (promptError) {
+      setSavedMessage(`Settings saved locally; prompt not persisted (${promptError})`);
+    } else if (promptSaved) {
+      setSavedMessage("Settings saved • prompt persisted globally");
+    } else {
+      setSavedMessage("Settings saved");
+    }
+    setTimeout(() => setSavedMessage(null), 2200);
   };
 
   const buildInitialResults = (handle: string) => {
@@ -410,11 +482,18 @@ export default function Home() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+    const activeRun =
+      isSearchInProgress ||
+      isAnalyzing ||
+      phases.profile === "running" ||
+      phases.heuristic === "running" ||
+      phases.llm === "running";
+
     const handleScroll = () => {
-      setShowBackToTop(isSearchInProgress && window.scrollY > 200);
+      setShowBackToTop(activeRun && window.scrollY > 200);
     };
 
-    if (isSearchInProgress) {
+    if (activeRun) {
       window.addEventListener("scroll", handleScroll, { passive: true } as AddEventListenerOptions);
       handleScroll();
     } else {
@@ -422,7 +501,7 @@ export default function Home() {
     }
 
     return () => window.removeEventListener("scroll", handleScroll);
-  }, [isSearchInProgress]);
+  }, [isSearchInProgress, isAnalyzing, phases.profile, phases.heuristic, phases.llm]);
 
   const handleSearch = async () => {
     const raw = queryInput.trim();
@@ -506,14 +585,20 @@ export default function Home() {
   const deepProfiles: DeepProfileResult[] = useMemo(() => {
     const source = foundDetails.length ? foundDetails : foundFromResults;
     if (!source.length || !profileReady) return [];
-    return source.map((p) => ({
-      platform: p.platform,
-      url: p.url,
-      displayName: p.displayName || `${username} • ${p.platform}`,
-      bio: p.bio || "Public profile detected (metadata parsed).",
-      avatar: normalizeAvatar(p.avatar, username, p.platform),
-      category: getCategoryForPlatform(p.platform),
-    }));
+    const byKey = new Map<string, DeepProfileResult>();
+    source.forEach((p) => {
+      const key = `${p.platform}__${p.url || ""}`;
+      if (byKey.has(key)) return;
+      byKey.set(key, {
+        platform: p.platform,
+        url: p.url,
+        displayName: p.displayName || `${username} • ${p.platform}`,
+        bio: p.bio || "Public profile detected (metadata parsed).",
+        avatar: normalizeAvatar(p.avatar, username, p.platform),
+        category: getCategoryForPlatform(p.platform),
+      });
+    });
+    return Array.from(byKey.values());
   }, [foundDetails, foundFromResults, profileReady, username]);
 
   const extractEmails = (text: string | null | undefined) => {
@@ -534,101 +619,114 @@ export default function Home() {
       avatar: normalizeAvatar((p as any).avatar, username, p.platform),
     }));
 
-    const identities: { id: string; label: string; kind: "identity"; source: "username" | "email" | "profile" }[] = [];
-    const identityKey = new Set<string>();
+    const rootLabel = (username || email || "root").trim() || "root";
+    const root = { id: "root", label: rootLabel, kind: "root" as const };
 
-    const addIdentity = (label: string, source: "username" | "email" | "profile") => {
-      const key = `${source}:${label.toLowerCase()}`;
-      if (identityKey.has(key)) return;
-      identityKey.add(key);
-      identities.push({ id: `${source}-${identities.length}`, label, kind: "identity", source });
+    type Leg = { id: string; label: string; source: string; reason: string; kind: "identity" | "category" | "unlinked" };
+
+    const legs: Leg[] = [];
+    const legProfilesMap: Record<string, typeof profilesForMap> = {};
+
+    const profileKey = (p: typeof profilesForMap[number]) => `${p.platform}__${p.url || ""}`;
+    const dedupeList = (list: typeof profilesForMap) => {
+      const seen = new Set<string>();
+      const unique: typeof profilesForMap = [];
+      list.forEach((p) => {
+        const key = profileKey(p);
+        if (seen.has(key)) return;
+        seen.add(key);
+        unique.push(p);
+      });
+      return unique;
     };
 
-    if (connectBy === "username" && username.trim()) {
-      addIdentity(username.trim(), "username");
+    const ensureLeg = (id: string, label: string, source: string, kind: Leg["kind"], reason: string) => {
+      if (legs.find((l) => l.id === id)) return;
+      legs.push({ id, label, source, kind, reason });
+      legProfilesMap[id] = [];
+    };
+
+    const assignProfileToLeg = (profile: typeof profilesForMap[number], legId: string) => {
+      legProfilesMap[legId] = legProfilesMap[legId] || [];
+      const key = profileKey(profile);
+      const exists = (legProfilesMap[legId] || []).some((p) => profileKey(p) === key);
+      if (!exists) legProfilesMap[legId].push(profile);
+    };
+
+    ensureLeg("leg-unlinked", "Unlinked", "unlinked", "unlinked", "No clear linkage; left unmatched.");
+
+    if (branchMode === "all") {
+      const trimmedUsername = username.trim();
+      if (trimmedUsername) {
+        ensureLeg("leg-username", trimmedUsername, "username", "identity", `Matched username “${trimmedUsername}” in profile data.`);
+      }
+
+      const emailSet = new Set<string>();
+      profilesForMap.forEach((p) => p.emails.forEach((em) => emailSet.add(em.toLowerCase())));
+      Array.from(emailSet).forEach((em, idx) => ensureLeg(`leg-email-${idx}`, em, "email", "identity", `Matched email “${em}”.`));
+
+      const nameCounts = new Map<string, number>();
+      profilesForMap.forEach((p) => {
+        const clean = (p.displayName || "").trim().toLowerCase();
+        if (!clean) return;
+        nameCounts.set(clean, (nameCounts.get(clean) || 0) + 1);
+      });
+      Array.from(nameCounts.entries()).forEach(([name, count], idx) => {
+        if (count > 1) ensureLeg(`leg-display-${idx}`, name, "profile", "identity", `Matched reused display name “${name}” (${count} hits).`);
+      });
+
+      profilesForMap.forEach((p) => {
+        const lowerName = (p.displayName || "").toLowerCase();
+        const lowerBio = (p.bio || "").toLowerCase();
+        const lowerUrl = (p.url || "").toLowerCase();
+        let target: string | null = null;
+
+        if (trimmedUsername) {
+          const uname = trimmedUsername.toLowerCase();
+          const hit = lowerName.includes(uname) || lowerBio.includes(uname) || lowerUrl.includes(uname);
+          if (hit) target = legs.find((l) => l.source === "username")?.id || null;
+        }
+
+        if (!target) {
+          const hitEmailLeg = legs.find((l) => l.source === "email" && p.emails.some((em) => em.toLowerCase() === l.label.toLowerCase()));
+          if (hitEmailLeg) target = hitEmailLeg.id;
+        }
+
+        if (!target) {
+          const hitNameLeg = legs.find((l) => l.source === "profile" && l.label === lowerName);
+          if (hitNameLeg) target = hitNameLeg.id;
+        }
+
+        assignProfileToLeg(p, target || "leg-unlinked");
+      });
+    } else {
+      const categories = new Map<string, typeof profilesForMap>();
+      profilesForMap.forEach((p) => {
+        const cat = p.category || "Uncategorized";
+        if (!categories.has(cat)) categories.set(cat, []);
+        categories.get(cat)!.push(p);
+      });
+
+      Array.from(categories.entries()).forEach(([cat, items], idx) => {
+        const legId = `leg-cat-${idx}`;
+        ensureLeg(legId, cat, "category", "category", `Category “${cat}” based on site catalog.`);
+        dedupeList(items).forEach((profile) => assignProfileToLeg(profile, legId));
+      });
     }
 
-    profilesForMap.forEach((p) => {
-      const cleanName = (p.displayName || "").trim();
-      if (connectBy === "profile" && cleanName) addIdentity(cleanName, "profile");
-      if (connectBy === "email") p.emails.forEach((em) => addIdentity(em, "email"));
-    });
+    const profileNodes = profilesForMap.map((p) => ({ ...p, kind: "profile" as const }));
 
-    const edges: { from: string; to: string; kind: "identity-profile" | "unknown" }[] = [];
-    const profileNodes: any[] = [];
-    const unlinked: any[] = [];
-
-    const usernameIdentityId = identities.find((i) => i.source === "username")?.id;
-
-    profilesForMap.forEach((p) => {
-      const profileNode = { ...p, kind: "profile" as const };
-      profileNodes.push(profileNode);
-      let connected = false;
-
-      if (connectBy === "username" && usernameIdentityId) {
-        edges.push({ from: usernameIdentityId, to: profileNode.id, kind: "identity-profile" });
-        connected = true;
-      }
-
-      if (connectBy === "profile") {
-        const cleanName = (p.displayName || "").trim().toLowerCase();
-        identities.forEach((id) => {
-          if (id.source !== "profile") return;
-          if (id.label.toLowerCase() === cleanName && cleanName) {
-            edges.push({ from: id.id, to: profileNode.id, kind: "identity-profile" });
-            connected = true;
-          }
-        });
-      }
-
-      if (connectBy === "email") {
-        identities.forEach((id) => {
-          if (id.source !== "email") return;
-          if (p.emails.some((em) => em.toLowerCase() === id.label.toLowerCase())) {
-            edges.push({ from: id.id, to: profileNode.id, kind: "identity-profile" });
-            connected = true;
-          }
-        });
-      }
-
-      if (!connected) {
-        unlinked.push(profileNode);
-      }
-    });
-
-    const unknownRoots = unlinked.length
-      ? Array.from({ length: Math.min(4, Math.max(1, Math.ceil(unlinked.length / 2))) }).map((_, idx) => ({
-          id: `unknown-root-${idx}`,
-          label: `unknown #${idx + 1}`,
-          kind: "unknown" as const,
-        }))
-      : [];
-
-    unlinked.forEach((profile, idx) => {
-      const root = unknownRoots[idx % Math.max(unknownRoots.length, 1)];
-      if (root) edges.push({ from: root.id, to: profile.id, kind: "unknown" });
-    });
-
-    const nodes: any[] = [...identities, ...unknownRoots, ...profileNodes];
-    return { nodes, edges };
-  }, [deepProfiles, foundFromResults, username, email, connectBy]);
+    return { root, legs, profiles: profileNodes, legProfilesMap };
+  }, [deepProfiles, foundFromResults, username, email, connectBy, branchMode]);
 
   useEffect(() => {
     setMapPan({ x: 0, y: 0 });
     setMapZoom(1);
-  }, [mindMapData.nodes.length, mindMapData.edges.length]);
+  }, [mindMapData.legs.length, mindMapData.profiles.length]);
 
   const identityProfilesMap = useMemo(() => {
-    const map: Record<string, any[]> = {};
-    mindMapData.edges.forEach((edge) => {
-      const fromIdentity = mindMapData.nodes.find((n) => n.id === edge.from && (n as any).kind === "identity");
-      const toProfile = mindMapData.nodes.find((n) => n.id === edge.to && (n as any).kind === "profile");
-      if (fromIdentity && toProfile) {
-        map[edge.from] = map[edge.from] || [];
-        map[edge.from].push(toProfile);
-      }
-    });
-    return map;
+    // For backward compatibility of naming; now maps legId -> profiles
+    return mindMapData.legProfilesMap;
   }, [mindMapData]);
 
   const buildProfiles = () => {
@@ -641,7 +739,7 @@ export default function Home() {
     setAnalysisError(null);
     updatePhase({ profile: "done", heuristic: "ready", llm: useLLM ? "ready" : "idle" });
     requestAnimationFrame(() => {
-      deepSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      scrollAndFocus(deepSectionRef);
     });
   };
 
@@ -685,7 +783,7 @@ export default function Home() {
       setLlmResult(null);
       updatePhase({ heuristic: "done", llm: useLLM ? "ready" : "idle" });
       requestAnimationFrame(() => {
-        analyzerSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        scrollAndFocus(analyzerSectionRef);
       });
     } catch (e) {
       setAnalysisError((e as Error).message);
@@ -737,11 +835,96 @@ export default function Home() {
       });
       updatePhase({ llm: "done" });
       requestAnimationFrame(() => {
-        exportSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        scrollAndFocus(exportSectionRef);
       });
     } catch (e) {
       setAnalysisError((e as Error).message);
       updatePhase({ llm: "ready" });
+    } finally {
+      setIsAnalyzing(false);
+    }
+  };
+
+  const runHeuristicAndLlm = async () => {
+    if (!deepProfiles.length || !useLLM || isAnalyzing) return;
+    setIsAnalyzing(true);
+    setAnalysisError(null);
+    setHeuristicResult(null);
+    setLlmResult(null);
+    updatePhase({ heuristic: "running", llm: "running" });
+
+    const payloadBase = deepProfiles.map((p) => ({
+      platform: p.platform,
+      url: p.url,
+      display_name: p.displayName,
+      bio: p.bio,
+      avatar: p.avatar,
+      category: p.category,
+    }));
+
+    try {
+      const heuristicRes = await fetch(`${API_BASE}/api/profile/analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          profiles: payloadBase,
+          use_llm: false,
+          username: username || undefined,
+          email: email || undefined,
+          prompt: analyzerPrompt || undefined,
+        }),
+      });
+
+      const heuristicData = await heuristicRes.json();
+      if (!heuristicRes.ok) throw new Error(heuristicData?.detail || heuristicData?.error || "Heuristic analysis failed");
+
+      setHeuristicResult({
+        summary: heuristicData.summary || "",
+        traits: heuristicData.traits || [],
+        risks: heuristicData.risks || [],
+        mode: heuristicData.mode || "heuristic",
+        llm_used: heuristicData.llm_used,
+        llm_model: heuristicData.llm_model,
+        llm_error: heuristicData.llm_error,
+      });
+
+      updatePhase({ heuristic: "done", llm: "running" });
+
+      const llmRes = await fetch(`${API_BASE}/api/profile/analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          profiles: payloadBase,
+          use_llm: true,
+          llm_model: llmModel,
+          ollama_host: ollamaHost,
+          api_mode: llmApiMode,
+          username: username || undefined,
+          email: email || undefined,
+          prompt: analyzerPrompt || undefined,
+        }),
+      });
+
+      const llmData = await llmRes.json();
+      if (!llmRes.ok) throw new Error(llmData?.detail || llmData?.error || "LLM analysis failed");
+
+      setLlmResult({
+        summary: llmData.summary || "",
+        traits: llmData.traits || [],
+        risks: llmData.risks || [],
+        mode: llmData.mode || "llm",
+        llm_used: llmData.llm_used,
+        llm_model: llmData.llm_model,
+        llm_error: llmData.llm_error,
+      });
+
+      updatePhase({ llm: "done" });
+      requestAnimationFrame(() => {
+        scrollAndFocus(exportSectionRef);
+      });
+    } catch (e) {
+      setAnalysisError((e as Error).message);
+      updatePhase({ heuristic: "idle", llm: "ready" });
     } finally {
       setIsAnalyzing(false);
     }
@@ -879,10 +1062,17 @@ export default function Home() {
 
   const scrollAndFocus = (ref: React.RefObject<HTMLElement | null>) => {
     if (!ref.current) return;
-    ref.current.scrollIntoView({ behavior: "smooth", block: "start" });
-    if (typeof ref.current.focus === "function") {
-      ref.current.focus({ preventScroll: true } as any);
+    if (ref.current) {
+      const yOffset = -15;
+      const elementTop = ref.current.getBoundingClientRect().top + window.scrollY + yOffset;
+      window.scrollTo({ top: elementTop, behavior: "smooth" });
+      ref.current.focus({ preventScroll: true });
     }
+  };
+
+  const formatSummary = (text: string | undefined | null) => {
+    if (!text) return "";
+    return text.replace(/\*\*/g, "").trim();
   };
 
   const openProfileModal = (p: DeepProfileResult) => {
@@ -927,7 +1117,7 @@ export default function Home() {
                 <span style={{ ["--index" as any]: 1 }}>deepkrak3n</span>
                 <span style={{ ["--index" as any]: 2 }}>deepkraken</span>
               </div>
-              <span className="stack-sub">OSINT Profile Analyzer</span>
+              <span className="stack-sub">OSINT Profile Search and Analysis</span>
             </div>
           </div>
           <button
@@ -982,7 +1172,7 @@ export default function Home() {
           </div>
           <div className="p-3 rounded-lg border" style={{ backgroundColor: palette.panelDark, borderColor: palette.border }}>
             <div style={{ color: palette.light }}>Phase 4</div>
-            <div className="font-semibold">LLM Analyzer</div>
+            <div className="font-semibold">LLM Analyser</div>
             <div className={`text-xs ${phaseTextClass(phases.llm)}`}>{phases.llm}</div>
           </div>
           <div className="p-3 rounded-lg border" style={{ backgroundColor: palette.panelDark, borderColor: palette.border }}>
@@ -995,126 +1185,141 @@ export default function Home() {
         </div>
       </motion.div>
 
-      <div className="max-w-5xl mx-auto space-y-10" ref={availabilitySectionRef} tabIndex={-1}>
+      <div className="max-w-5xl mx-auto space-y-8" ref={availabilitySectionRef} tabIndex={-1}>
         {(isChecking || results.length > 0) && (
-        <section className="space-y-4">
-          <div className="flex items-center justify-between">
-            <button
-              onClick={() => setAvailabilityCollapsed((v) => !v)}
-              className="text-left"
-              aria-expanded={!availabilityCollapsed}
-            >
-              <div className="flex items-center gap-3">
-                <ChevronDown className={`w-5 h-5 transition-transform ${availabilityCollapsed ? "-rotate-90" : "rotate-0"}`} />
-                <div>
-                  <h2 className="text-xl font-semibold">Availability</h2>
-                  <div className="flex items-center gap-2 text-sm" style={{ color: palette.light }}>
-                    <span>{isChecking ? "Streaming results..." : results.length ? `${results.filter((r) => r.status === "found").length} found / ${results.length}` : "Idle"}</span>
-                    {results.length > 0 && (
-                      <span className="px-2 py-1 rounded-full text-xs" style={{ backgroundColor: palette.panelDark, border: `1px solid ${palette.border}` }}>
-                        {results.filter((r) => r.status === "found").length}/{results.length}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </button>
-            <div className="flex items-center gap-2 text-sm" style={{ color: palette.light }}>
+          <section className="space-y-4 rounded-xl border" style={{ borderColor: palette.border }}>
+            <div className="flex items-center justify-between py-3" style={{ minHeight: 88, paddingRight: 15 }}>
               <button
-                onClick={() => {
-                  if (!profileReady) buildProfiles();
-                  scrollAndFocus(deepSectionRef);
-                }}
-                disabled={(!foundDetails.length && !foundFromResults.length) || hasInFlightResults}
-                className="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-xs disabled:cursor-not-allowed"
-                style={phaseButtonStyle(!((!foundDetails.length && !foundFromResults.length) || hasInFlightResults), phases.availability === "done")}
+                onClick={() => setAvailabilityCollapsed((v) => !v)}
+                className="text-left"
+                aria-expanded={!availabilityCollapsed}
               >
-                <CheckCircle className="w-4 h-4" /> Next phase → Profile check
-              </button>
-            </div>
-          </div>
-          {!availabilityCollapsed && (
-            <div className="space-y-3 border rounded-lg" style={{ backgroundColor: palette.panel, borderColor: palette.border }}>
-              <div className="px-4 pb-4 space-y-3" style={{ minHeight: 220, paddingTop: 17 }}>
-                {Object.entries(platformCategories).map(([category, platforms]) => {
-                  const categoryResults = getResultsForCategory(platforms);
-                  if (!categoryResults.length) return null;
-                  const expanded = expandedCategories[category];
-                  return (
-                    <div key={category} className="border rounded-lg" style={{ backgroundColor: palette.panel, borderColor: palette.border }}>
-                      <button
-                        onClick={() => toggleCategory(category)}
-                        className="w-full px-4 py-3 flex items-center justify-between"
-                        style={{ backgroundColor: expanded ? "rgba(96,81,155,0.15)" : palette.panel }}
-                      >
-                        <div className="flex items-center gap-2">
-                          <ChevronDown className={`w-4 h-4 transition-transform ${expanded ? "rotate-180" : ""}`} />
-                          <span className="font-semibold">{category}</span>
-                        </div>
-                        <span className="text-sm" style={{ color: palette.light }}>
-                          {categoryResults.filter((r) => r.status === "found").length}/{categoryResults.length} found
+                <div className="flex items-center gap-3">
+                  <ChevronDown className={`w-5 h-5 transition-transform ${availabilityCollapsed ? "-rotate-90" : "rotate-0"}`} />
+                  <div>
+                    <h2 className="text-xl font-semibold">Availability</h2>
+                    <div className="flex items-center gap-2 text-sm" style={{ color: palette.light }}>
+                      <span>{isChecking ? "Streaming results..." : results.length ? `${results.filter((r) => r.status === "found").length} found / ${results.length}` : "Idle"}</span>
+                      {results.length > 0 && (
+                        <span className="px-2 py-1 rounded-full text-xs" style={{ backgroundColor: palette.panelDark, border: `1px solid ${palette.border}` }}>
+                          {results.filter((r) => r.status === "found").length}/{results.length}
                         </span>
-                      </button>
-                      {expanded && (
-                        <div className="p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3" style={{ borderTop: `1px solid ${palette.border}` }}>
-                          {categoryResults.map((r) => (
-                            <div
-                              key={r.platform}
-                              className={`rounded-lg border ${statusClasses(r.status, r.checking)} px-3 py-2 flex items-center justify-between`}
-                            >
-                              <div>
-                                <div className="font-medium">{r.platform}</div>
-                                {r.reason && <div className="text-xs text-gray-300">{r.reason}</div>}
-                                {r.viaProxy && <div className="text-[11px]" style={{ color: palette.light }}>via proxy</div>}
-                              </div>
-                              <div className="flex items-center gap-2">
-                                {r.status === "found" && (
-                                  <a
-                                    href={r.url || getPlatformUrl(r.platform, username) || "#"}
-                                    className="text-lg"
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    aria-label={`Open ${r.platform}`}
-                                  >
-                                    🔗
-                                  </a>
-                                )}
-                                <span className="text-xs font-semibold px-2 py-1 rounded-full border" style={{ borderColor: palette.border }}>
-                                  {statusLabel(r.status, r.checking)}
-                                </span>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
                       )}
                     </div>
-                  );
-                })}
+                  </div>
+                </div>
+              </button>
+              <div className="flex items-center gap-2 text-sm" style={{ color: palette.light }}>
+                <button
+                  onClick={() => {
+                    if (!profileReady) buildProfiles();
+                    scrollAndFocus(deepSectionRef);
+                  }}
+                  disabled={(!foundDetails.length && !foundFromResults.length) || hasInFlightResults}
+                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium whitespace-nowrap disabled:cursor-not-allowed"
+                  style={{
+                    ...phaseButtonStyle(!((!foundDetails.length && !foundFromResults.length) || hasInFlightResults), phases.availability === "done"),
+                    width: 240,
+                    height: 42,
+                  }}
+                >
+                  <Play className="w-4 h-4" /> Next phase → Profile check
+                </button>
               </div>
             </div>
-          )}
-        </section>
+            {!availabilityCollapsed && (
+              <div className="space-y-3 border rounded-lg" style={{ backgroundColor: palette.panel, borderColor: palette.border }}>
+                <div className="px-4 pb-4 space-y-3" style={{ minHeight: 220, paddingTop: 17 }}>
+                  {Object.entries(platformCategories).map(([category, platforms]) => {
+                    const categoryResults = getResultsForCategory(platforms);
+                    if (!categoryResults.length) return null;
+                    const expanded = expandedCategories[category];
+                    return (
+                      <div key={category} className="border rounded-lg" style={{ backgroundColor: palette.panel, borderColor: palette.border }}>
+                        <button
+                          onClick={() => toggleCategory(category)}
+                          className="w-full px-4 py-3 flex items-center justify-between"
+                          style={{ backgroundColor: expanded ? "rgba(96,81,155,0.15)" : palette.panel }}
+                        >
+                          <div className="flex items-center gap-2">
+                            <ChevronDown className={`w-4 h-4 transition-transform ${expanded ? "rotate-180" : ""}`} />
+                            <span className="font-semibold">{category}</span>
+                          </div>
+                          <span className="text-sm" style={{ color: palette.light }}>
+                            {categoryResults.filter((r) => r.status === "found").length}/{categoryResults.length} found
+                          </span>
+                        </button>
+                        {expanded && (
+                          <div className="p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3" style={{ borderTop: `1px solid ${palette.border}` }}>
+                            {categoryResults.map((r) => (
+                              <div
+                                key={r.platform}
+                                className={`rounded-lg border ${statusClasses(r.status, r.checking)} px-3 py-2 flex items-center justify-between`}
+                              >
+                                <div>
+                                  <div className="font-medium">{r.platform}</div>
+                                  {r.reason && <div className="text-xs text-gray-300">{r.reason}</div>}
+                                  {r.viaProxy && <div className="text-[11px]" style={{ color: palette.light }}>via proxy</div>}
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  {r.status === "found" && (
+                                    <a
+                                      href={r.url || getPlatformUrl(r.platform, username) || "#"}
+                                      className="text-lg"
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      aria-label={`Open ${r.platform}`}
+                                    >
+                                      🔗
+                                    </a>
+                                  )}
+                                  <span className="text-xs font-semibold px-2 py-1 rounded-full border" style={{ borderColor: palette.border }}>
+                                    {statusLabel(r.status, r.checking)}
+                                  </span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </section>
         )}
 
         {profileReady && (
-        <section ref={deepSectionRef} className="space-y-3" tabIndex={-1} style={{ paddingTop: 15 }}>
-          <div className="flex items-center justify-between">
-            <h2 className="text-xl font-semibold">Deep profiles</h2>
+          <section ref={deepSectionRef} className="space-y-3 rounded-xl border" tabIndex={-1} style={{ borderColor: palette.border }}>
+          <div className="flex items-center justify-between py-3" style={{ minHeight: 88, paddingRight: 15 }}>
+            <button
+              onClick={() => setProfileCheckCollapsed((v) => !v)}
+              className="flex items-center gap-2 text-left"
+              aria-expanded={!profileCheckCollapsed}
+            >
+              <ChevronDown className={`w-5 h-5 transition-transform ${profileCheckCollapsed ? "-rotate-90" : "rotate-0"}`} />
+              <h2 className="text-xl font-semibold">Profile check</h2>
+            </button>
             <button
               onClick={() => {
                 if (!deepProfiles.length) return;
-                runHeuristic();
-                scrollAndFocus(analyzerSectionRef);
+                setDeepAnalysisCollapsed(false);
+                scrollAndFocus(deepAnalysisSectionRef);
               }}
               disabled={!deepProfiles.length || isAnalyzing}
-              className="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm disabled:cursor-not-allowed"
-              style={phaseButtonStyle(!( !deepProfiles.length || isAnalyzing ), phases.profile === "ready" || phases.profile === "done")}
+              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium whitespace-nowrap disabled:cursor-not-allowed"
+              style={{
+                ...phaseButtonStyle(!( !deepProfiles.length || isAnalyzing ), phases.profile === "ready" || phases.profile === "done"),
+                width: 240,
+                height: 42,
+              }}
             >
               <Play className="w-4 h-4" /> Next phase → Deep analysis
             </button>
           </div>
 
-          {deepProfiles.length > 0 && (
+          {!profileCheckCollapsed && deepProfiles.length > 0 && (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4" style={{ paddingTop: 12 }}>
               {deepProfiles.map((p) => (
                 <div key={p.platform} className="p-4 rounded-lg border" style={{ backgroundColor: palette.panel, borderColor: palette.border }}>
@@ -1145,103 +1350,85 @@ export default function Home() {
         )}
 
         {deepProfiles.length > 0 && (
-        <section ref={analyzerSectionRef} className="space-y-3" tabIndex={-1}>
-          <div className="flex items-center justify-between">
-            <h2 className="text-xl font-semibold">Profile analyzer</h2>
+          <section className="space-y-3 rounded-xl border" tabIndex={-1} ref={deepAnalysisSectionRef} style={{ borderColor: palette.border }}>
+          <div className="flex items-center justify-between py-3" style={{ minHeight: 88, paddingRight: 15 }}>
+            <button
+              onClick={() => setDeepAnalysisCollapsed((v) => !v)}
+              className="flex items-center gap-2 text-left"
+              aria-expanded={!deepAnalysisCollapsed}
+            >
+              <ChevronDown className={`w-5 h-5 transition-transform ${deepAnalysisCollapsed ? "-rotate-90" : "rotate-0"}`} />
+              <h2 className="text-xl font-semibold">Deep Analysis</h2>
+            </button>
             <div className="flex items-center gap-2">
               <button
                 onClick={() => {
-                  if (isAnalyzing || !deepProfiles.length) return;
-                  runHeuristic();
+                  setLlmCollapsed(false);
                   scrollAndFocus(analyzerSectionRef);
+                  if (isAnalyzing || !deepProfiles.length || !useLLM) return;
+                  runHeuristicAndLlm();
                 }}
-                disabled={isAnalyzing || !deepProfiles.length}
-                className="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm disabled:cursor-not-allowed"
-                style={{ backgroundColor: palette.accentDark, border: `1px solid ${palette.border}`, color: palette.light, opacity: isAnalyzing || !deepProfiles.length ? 0.5 : 1 }}
-              >
-                <Play className="w-4 h-4" /> {isAnalyzing && phases.llm !== "running" ? "Analyzing..." : "Deep Analysis"}
-              </button>
-              <button
-                onClick={() => {
-                  if (isAnalyzing || !deepProfiles.length || phases.heuristic !== "done" || !useLLM) return;
-                  runLlm();
-                  scrollAndFocus(analyzerSectionRef);
+                disabled={isAnalyzing || !deepProfiles.length || !useLLM}
+                className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium whitespace-nowrap disabled:cursor-not-allowed"
+                style={{
+                  ...phaseButtonStyle(!(isAnalyzing || !deepProfiles.length || !useLLM), phases.llm === "ready" || phases.heuristic === "done"),
+                  width: 240,
+                  height: 42,
                 }}
-                disabled={isAnalyzing || !deepProfiles.length || phases.heuristic !== "done" || !useLLM}
-                className="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm disabled:cursor-not-allowed"
-                style={phaseButtonStyle(!(isAnalyzing || !deepProfiles.length || phases.heuristic !== "done" || !useLLM), phases.heuristic === "done")}
               >
-                <Play className="w-4 h-4" /> {isAnalyzing && phases.llm === "running" ? "Analyzing..." : "Next phase → LLM analyzer"}
+                <Play className="w-4 h-4" /> {isAnalyzing ? "Running heuristic + LLM..." : "Next phase → LLM analyser"}
               </button>
             </div>
           </div>
-          {mindMapData.nodes.length > 1 && (() => {
-            const identities = mindMapData.nodes.filter((n) => (n as any).kind === "identity");
-            const profileNodes = mindMapData.nodes.filter((n) => (n as any).kind === "profile");
-            const linkedProfileIds = new Set<string>();
-            mindMapData.edges.forEach((edge) => {
-              if (identities.some((id) => id.id === edge.from)) linkedProfileIds.add(edge.to);
-            });
-            const unlinkedProfiles = profileNodes.filter((p) => !linkedProfileIds.has(p.id));
+          {!deepAnalysisCollapsed && (
+          <>
+          {mindMapData.profiles.length > 0 && (() => {
+            const legs = mindMapData.legs.filter((leg) => (identityProfilesMap[leg.id] || []).length > 0);
+            const profileNodes = mindMapData.profiles;
 
-            const clusters = identities.map((id) => ({ id: id.id, label: (id as any).label || id.id, profiles: identityProfilesMap[id.id] || [], kind: "identity" as const, source: (id as any).source }));
-            if (unlinkedProfiles.length) clusters.push({ id: "unlinked", label: "Unlinked profiles", profiles: unlinkedProfiles as any[], kind: "unknown" as const });
+            const ringGap = 140;
+            const baseRadius = 180;
+            const svgWidth = 1400;
+            const svgHeight = 980;
+            const center = { x: svgWidth / 2, y: svgHeight / 2 };
 
-            const ringSize = 8; // profiles per ring (smaller rings reduce overlap)
-            const baseRadius = 140;
-            const ringGap = 130;
+            const angleStep = legs.length ? (Math.PI * 2) / legs.length : Math.PI * 2;
 
-            const clusterMeta = clusters.map((cluster) => {
-              const ringCount = Math.max(1, Math.ceil((cluster.profiles?.length || 0) / ringSize));
-              const radius = baseRadius + (ringCount - 1) * ringGap;
-              return { ...cluster, ringCount, radius };
-            });
-
-            const maxRadius = Math.max(baseRadius, ...clusterMeta.map((c) => c.radius));
-            const clusterWidth = maxRadius * 2 + 220;
-            const clusterHeight = maxRadius * 2 + 220;
-            const cols = Math.max(1, Math.ceil(Math.sqrt(clusterMeta.length)));
-            const rows = Math.max(1, Math.ceil(clusterMeta.length / cols));
-            const svgWidth = clusterWidth * cols;
-            const svgHeight = clusterHeight * rows;
-
-            const clusterCenters = clusterMeta.map((cluster, idx) => {
-              const col = idx % cols;
-              const row = Math.floor(idx / cols);
-              return {
-                ...cluster,
-                cx: col * clusterWidth + clusterWidth / 2,
-                cy: row * clusterHeight + clusterHeight / 2,
-              };
+            const legPositions = legs.map((leg, idx) => {
+              const angle = -Math.PI / 2 + idx * angleStep;
+              const cx = center.x + baseRadius * Math.cos(angle);
+              const cy = center.y + baseRadius * Math.sin(angle);
+              return { ...leg, angle, cx, cy };
             });
 
-            const describeBranchBasis = (cluster: any) => {
-              if (cluster.kind !== "identity") {
-                return { type: "unlinked", value: cluster.label || "Unlinked", note: "No direct match; grouped for layout only." };
-              }
+            const profilePositions = legPositions.flatMap((leg) => {
+              const profiles = (identityProfilesMap[leg.id] || []).slice().sort((a, b) => likelihoodScore(b) - likelihoodScore(a));
+              return profiles.map((p, idx) => {
+                const radius = baseRadius + (idx + 1) * ringGap;
+                const x = center.x + radius * Math.cos(leg.angle);
+                const y = center.y + radius * Math.sin(leg.angle);
+                return { ...p, x, y, legId: leg.id, legReason: leg.reason, legLabel: leg.label, legSource: leg.source };
+              });
+            });
 
-              if (cluster.source === "username") {
-                return { type: "username", value: cluster.label, note: `Shared username “${cluster.label}” from the search handle.` };
-              }
-
-              if (cluster.source === "email") {
-                return { type: "email", value: cluster.label, note: `Shared email “${cluster.label}” extracted from profile metadata.` };
-              }
-
-              if (cluster.source === "profile") {
-                return { type: "display name", value: cluster.label, note: `Matching display name “${cluster.label}”.` };
-              }
-
-              return { type: "identity", value: cluster.label, note: `Linked via identity “${cluster.label}”.` };
+            const describeBranchBasis = (leg: any) => {
+              if (!leg) return { type: "unknown", value: "", note: "" };
+              if (leg.kind === "category") return { type: "category", value: leg.label, note: leg.reason };
+              if (leg.source === "username") return { type: "username", value: leg.label, note: leg.reason };
+              if (leg.source === "email") return { type: "email", value: leg.label, note: leg.reason };
+              if (leg.source === "profile") return { type: "display name", value: leg.label, note: leg.reason };
+              return { type: "unlinked", value: leg.label, note: leg.reason };
             };
 
             return (
               <div className="p-4 rounded-lg border space-y-3" style={{ backgroundColor: palette.panel, borderColor: palette.border }}>
                 <div className="flex items-center justify-between flex-wrap gap-3">
-                  <div className="text-sm" style={{ color: palette.light }}>Mind map: drag to pan, double-click to zoom; separate radial stars per identity; links only when data matches.</div>
+                  <div className="text-sm" style={{ color: palette.light }}>
+                    Mind map: central handle with radial legs. View All = detected links; By category = availability categories.
+                  </div>
                   <div className="flex items-center gap-3 text-xs" style={{ color: palette.light }}>
                     <span>
-                      {profileNodes.length} profiles • {identities.length} identities
+                      {profileNodes.length} profiles • {legs.length} legs
                     </span>
                     <span className="flex items-center gap-2">
                       Zoom
@@ -1280,11 +1467,10 @@ export default function Home() {
                       ))}
                     </div>
                     <div className="flex items-center gap-2">
-                      <span>Branch view</span>
+                      <span>View</span>
                       {([
-                        { value: "all", label: "view all" },
-                        { value: "single-pack", label: "pack single" },
-                        { value: "sorted", label: "sorted slots" },
+                        { value: "all", label: "View All" },
+                        { value: "category", label: "By category" },
                       ] as const).map((opt) => (
                         <label key={opt.value} className="flex items-center gap-1">
                           <input
@@ -1314,212 +1500,294 @@ export default function Home() {
                     onDoubleClick={handleMapDoubleClick}
                   >
                     <g transform={`translate(${mapPan.x} ${mapPan.y}) scale(${mapZoom})`}>
-                    {clusterCenters.map((cluster) => {
-                      const profiles = cluster.profiles;
-                      const getRingRadius = (ringIndex: number) => baseRadius + ringIndex * ringGap;
+                      {/* root */}
+                      <circle cx={center.x} cy={center.y} r={26} fill={palette.accentDark} stroke={palette.border} strokeWidth={2} />
+                      <text x={center.x} y={center.y + 40} textAnchor="middle" fontSize={14} fill={palette.light}>
+                        {mindMapData.root.label}
+                      </text>
 
-                      const angleStep = (Math.PI * 2) / ringSize;
-
-                      const sortedProfiles = branchMode === "sorted"
-                        ? [...profiles].sort((a, b) => {
-                            const catA = (a.category || "").toLowerCase();
-                            const catB = (b.category || "").toLowerCase();
-                            if (catA !== catB) return catA.localeCompare(catB);
-                            return (a.label || a.id || "").localeCompare(b.label || b.id || "");
-                          })
-                        : profiles;
-
-                      const positions = sortedProfiles.map((p, idx) => {
-                        const ringIndex = Math.floor(idx / ringSize);
-                        const slotIndex = idx % ringSize;
-                        const angle = -Math.PI / 2 + slotIndex * angleStep;
-                        const radius = getRingRadius(ringIndex);
-                        const x = cluster.cx + radius * Math.cos(angle);
-                        const y = cluster.cy + radius * Math.sin(angle);
-                        return { ...p, x, y, angle, radius, slotIndex, ringIndex };
-                      });
-
-                      const clipId = `avatar-clip-${cluster.id}`;
-
-                      return (
-                        <g key={cluster.id}>
-                          <defs>
-                            <clipPath id={clipId}>
-                              <circle cx="20" cy="20" r="20" />
-                            </clipPath>
-                          </defs>
-
-                          {positions.map((p) => (
-                            <g key={p.id}>
-                              {showConnections && (
-                                <line x1={cluster.cx} y1={cluster.cy} x2={p.x} y2={p.y} stroke={palette.border} strokeWidth={1.4} strokeOpacity={0.8} />
-                              )}
-                              {p.avatar && (
-                                <g transform={`translate(${p.x - 20}, ${p.y - 20})`}>
-                                  <image href={p.avatar} width="40" height="40" clipPath={`url(#${clipId})`} />
-                                </g>
-                              )}
-                              {!p.avatar && <circle cx={p.x} cy={p.y} r={10} fill={palette.light} />}
-                              <text x={p.x} y={p.y + 32} textAnchor="middle" fontSize={12} fill={palette.light}>
-                                {(p.label || p.id || "").slice(0, 28)}
-                              </text>
-                              <rect
-                                x={p.x - 24}
-                                y={p.y - 24}
-                                width={48}
-                                height={48}
-                                fill="transparent"
-                                onClick={() => {
-                                  const modalProfile = deepProfiles.find((dp) => dp.platform === p.id) || {
-                                    platform: p.id,
-                                    url: p.url || "#",
-                                    displayName: p.label,
-                                    bio: p.bio || "",
-                                    avatar: p.avatar,
-                                    category: p.category,
-                                  };
-                                  openProfileModal(modalProfile as any);
-
-                                  let lineNodes = positions;
-
-                                  if (branchMode === "all") {
-                                    lineNodes = positions;
-                                  } else if (branchMode === "single-pack") {
-                                    lineNodes = positions;
-                                  } else {
-                                    const clickedSlot = p.slotIndex;
-                                    lineNodes = positions.filter((pos) => pos.slotIndex === clickedSlot).sort((a, b) => a.radius - b.radius);
-                                  }
-
-                                  const mapPosToProfile = (node: any): DeepProfileResult => {
-                                    const match = deepProfiles.find((dp) => dp.platform === node.id);
-                                    if (match) return match;
-                                    return {
-                                      platform: node.id,
-                                      url: node.url || getPlatformUrl(node.id, username || ""),
-                                      displayName: node.label || node.id,
-                                      bio: node.bio || "",
-                                      avatar: node.avatar || fallbackAvatar(node.label || node.id),
-                                      category: node.category,
-                                    } as DeepProfileResult;
-                                  };
-
-                                  const branchProfiles = lineNodes.map(mapPosToProfile);
-                                  setActiveBranch({ label: cluster.label, nodes: branchProfiles, basis: describeBranchBasis(cluster) });
-                                }}
-                                style={{ cursor: "pointer" }}
-                              />
-                            </g>
-                          ))}
-
-                          <circle cx={cluster.cx} cy={cluster.cy} r={18} fill={cluster.kind === "identity" ? palette.accent : palette.border} />
-                          <text x={cluster.cx} y={cluster.cy + 36} textAnchor="middle" fontSize={13} fill={palette.light}>
-                            {cluster.label} ({cluster.profiles.length})
+                      {/* legs */}
+                      {legPositions.map((leg) => (
+                        <g key={leg.id}>
+                          {showConnections && (
+                            <line x1={center.x} y1={center.y} x2={leg.cx} y2={leg.cy} stroke={palette.border} strokeWidth={2} strokeOpacity={0.9} />
+                          )}
+                          <circle cx={leg.cx} cy={leg.cy} r={18} fill={palette.accent} stroke={palette.border} strokeWidth={1.5} />
+                          <text x={leg.cx} y={leg.cy + 34} textAnchor="middle" fontSize={12} fill={palette.light}>
+                            {leg.label} ({(identityProfilesMap[leg.id] || []).length})
                           </text>
                         </g>
-                      );
-                    })}
+                      ))}
+
+                      {/* profiles */}
+                      {profilePositions.map((p) => {
+                        const clipId = `avatar-clip-${p.id}`;
+                        const legMeta = legPositions.find((l) => l.id === p.legId);
+                        return (
+                          <g key={p.id}>
+                            {showConnections && legMeta && (
+                              <line x1={legMeta.cx} y1={legMeta.cy} x2={p.x} y2={p.y} stroke={palette.border} strokeWidth={1.3} strokeOpacity={0.75} />
+                            )}
+                            {/* avatar halo to sit above connecting lines */}
+                            <circle cx={p.x} cy={p.y} r={24} fill={palette.panelDark} stroke={palette.border} strokeWidth={1.2} />
+                            <defs>
+                              <clipPath id={clipId}>
+                                <circle cx="20" cy="20" r="20" />
+                              </clipPath>
+                            </defs>
+                            {p.avatar && (
+                              <g transform={`translate(${p.x - 20}, ${p.y - 20})`}>
+                                <image href={p.avatar} width="40" height="40" clipPath={`url(#${clipId})`} />
+                              </g>
+                            )}
+                            {!p.avatar && <circle cx={p.x} cy={p.y} r={10} fill={palette.light} />}
+                            <text x={p.x} y={p.y + 32} textAnchor="middle" fontSize={12} fill={palette.light}>
+                              {(p.label || p.id || "").slice(0, 28)}
+                            </text>
+                            <circle
+                              cx={p.x}
+                              cy={p.y}
+                              r={26}
+                              fill="transparent"
+                              stroke="none"
+                              onClick={() => {
+                                const modalProfile = deepProfiles.find((dp) => dp.platform === p.id);
+                                if (modalProfile) {
+                                  openProfileModal(modalProfile);
+                                }
+
+                                const legId = p.legId;
+                                const branchProfiles = (identityProfilesMap[legId] || []).map((node) => {
+                                  const match = deepProfiles.find((dp) => dp.platform === node.id);
+                                  if (match) return match;
+                                  return {
+                                    platform: node.id,
+                                    url: node.url || getPlatformUrl(node.id, username || ""),
+                                    displayName: node.label || node.id,
+                                    bio: (node as any).bio || "",
+                                    avatar: (node as any).avatar || fallbackAvatar(node.label || node.id),
+                                    category: (node as any).category,
+                                  } as DeepProfileResult;
+                                });
+
+                                setActiveBranch({
+                                  label: legMeta?.label || "Branch",
+                                  nodes: branchProfiles,
+                                  basis: describeBranchBasis(legMeta),
+                                  viewMode: branchMode,
+                                  category: p.category || null,
+                                });
+                              }}
+                              style={{ cursor: "pointer" }}
+                            />
+                          </g>
+                        );
+                      })}
                     </g>
                   </svg>
                 </div>
 
                 <div className="text-xs" style={{ color: palette.light }}>
-                  Each identity gets its own radial star. Connections only appear when the selected pivot (username/email/profile) matches profile data.
+                  Central node = searched handle; View All links by detected pivots; By category groups by availability categories. Click a profile to see only that leg and the reason.
                 </div>
               </div>
             );
           })()}
+          </>
+          )}
+        </section>
+        )}
+
+        {deepProfiles.length > 0 && (
+          <section ref={analyzerSectionRef} className="space-y-3 rounded-xl border" tabIndex={-1} style={{ borderColor: palette.border }}>
+          <div className="flex items-center justify-between py-3" style={{ minHeight: 88, paddingRight: 15 }}>
+            <button
+              onClick={() => setLlmCollapsed((v) => !v)}
+              className="flex items-center gap-2 text-left"
+              aria-expanded={!llmCollapsed}
+            >
+              <ChevronDown className={`w-5 h-5 transition-transform ${llmCollapsed ? "-rotate-90" : "rotate-0"}`} />
+              <h2 className="text-xl font-semibold">LLM Analyser</h2>
+            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  setExportCollapsed(false);
+                  scrollAndFocus(exportSectionRef);
+                }}
+                disabled={!results.length && !deepProfiles.length}
+                className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium whitespace-nowrap disabled:cursor-not-allowed"
+                style={{
+                  ...phaseButtonStyle(!(!results.length && !deepProfiles.length), phases.export || true),
+                  width: 240,
+                  height: 42,
+                }}
+              >
+                <Play className="w-4 h-4" /> Next phase → Export data
+              </button>
+            </div>
+          </div>
+          {!llmCollapsed && (
+          <>
           {analysisError && <div className="text-sm text-rose-300">{analysisError}</div>}
-          {heuristicResult && (
+          {(heuristicResult || !heuristicResult) && (
             <div className="p-4 rounded-lg border space-y-3" style={{ backgroundColor: palette.panel, borderColor: palette.border }}>
-              <div className="text-sm text-gray-400">Heuristic summary</div>
-              <div className="text-lg font-semibold text-emerald-200">{heuristicResult.summary}</div>
-              {heuristicResult.traits?.length > 0 && (
+              <div className="flex items-start justify-between gap-3">
                 <div>
-                  <div className="text-sm text-gray-400">Traits</div>
+                  <div className="text-base font-semibold" style={{ color: palette.light }}>Heuristic summary</div>
+                  <div className="text-sm whitespace-pre-line" style={{ color: palette.light }}>
+                    {heuristicResult ? formatSummary(heuristicResult.summary) : "No heuristic run yet."}
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    if (isAnalyzing || !deepProfiles.length) return;
+                    runHeuristic();
+                    scrollAndFocus(analyzerSectionRef);
+                  }}
+                  disabled={isAnalyzing || !deepProfiles.length}
+                  className="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm disabled:cursor-not-allowed whitespace-nowrap"
+                  style={{ backgroundColor: palette.accentDark, border: `1px solid ${palette.border}`, color: palette.light, opacity: isAnalyzing || !deepProfiles.length ? 0.5 : 1 }}
+                >
+                  <Play className="w-4 h-4" /> {isAnalyzing && phases.llm !== "running" ? "Analysing..." : "Run heuristic"}
+                </button>
+              </div>
+              {heuristicResult?.traits?.length ? (
+                <div>
+                  <div className="text-sm" style={{ color: palette.light }}>Traits</div>
                   <div className="flex flex-wrap gap-2 mt-1">
                     {heuristicResult.traits.map((t) => (
                       <span key={t} className="px-2 py-1 text-xs rounded-full bg-slate-800 border border-slate-600">{t}</span>
                     ))}
                   </div>
                 </div>
-              )}
-              {heuristicResult.risks?.length > 0 && (
+              ) : null}
+              {heuristicResult?.risks?.length ? (
                 <div>
-                  <div className="text-sm text-gray-400">Risks</div>
+                  <div className="text-sm" style={{ color: palette.light }}>Risks</div>
                   <div className="flex flex-wrap gap-2 mt-1">
                     {heuristicResult.risks.map((r) => (
                       <span key={r} className="px-2 py-1 text-xs rounded-full bg-amber-900/60 border border-amber-700 text-amber-100">{r}</span>
                     ))}
                   </div>
                 </div>
-              )}
+              ) : null}
             </div>
           )}
 
-          {llmResult && (
+          {(llmResult || !llmResult) && (
             <div className="p-4 rounded-lg border space-y-3" style={{ backgroundColor: palette.panel, borderColor: palette.border }}>
-              <div className="text-sm text-gray-400">LLM summary {llmResult.llm_model ? `(${llmResult.llm_model})` : ""}</div>
-              <div className="text-lg font-semibold text-emerald-200">{llmResult.summary}</div>
-              {llmResult.traits?.length > 0 && (
+              <div className="flex items-start justify-between gap-3">
                 <div>
-                  <div className="text-sm text-gray-400">Traits</div>
+                  <div className="text-base font-semibold" style={{ color: palette.light }}>LLM summary {llmResult?.llm_model ? `(${llmResult.llm_model})` : ""}</div>
+                  <div className="text-sm whitespace-pre-line" style={{ color: palette.light }}>
+                    {llmResult ? formatSummary(llmResult.summary) : "No LLM run yet."}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setSettingsOpen(true)}
+                    className="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm"
+                    style={{ backgroundColor: palette.panel, border: `1px solid ${palette.border}`, color: palette.light }}
+                    aria-label="Open analyser settings"
+                  >
+                    <Settings className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (isAnalyzing || !deepProfiles.length || phases.heuristic !== "done" || !useLLM) return;
+                      runLlm();
+                      scrollAndFocus(analyzerSectionRef);
+                    }}
+                    disabled={isAnalyzing || !deepProfiles.length || phases.heuristic !== "done" || !useLLM}
+                    className="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm disabled:cursor-not-allowed whitespace-nowrap"
+                    style={phaseButtonStyle(!(isAnalyzing || !deepProfiles.length || phases.heuristic !== "done" || !useLLM), phases.heuristic === "done")}
+                  >
+                    <Play className="w-4 h-4" /> {isAnalyzing && phases.llm === "running" ? "Analysing..." : "Run LLM"}
+                  </button>
+                </div>
+              </div>
+              {llmResult?.traits?.length ? (
+                <div>
+                  <div className="text-sm" style={{ color: palette.light }}>Traits</div>
                   <div className="flex flex-wrap gap-2 mt-1">
                     {llmResult.traits.map((t) => (
                       <span key={t} className="px-2 py-1 text-xs rounded-full bg-slate-800 border border-slate-600">{t}</span>
                     ))}
                   </div>
                 </div>
-              )}
-              {llmResult.risks?.length > 0 && (
+              ) : null}
+              {llmResult?.risks?.length ? (
                 <div>
-                  <div className="text-sm text-gray-400">Risks</div>
+                  <div className="text-sm" style={{ color: palette.light }}>Risks</div>
                   <div className="flex flex-wrap gap-2 mt-1">
                     {llmResult.risks.map((r) => (
                       <span key={r} className="px-2 py-1 text-xs rounded-full bg-amber-900/60 border border-amber-700 text-amber-100">{r}</span>
                     ))}
                   </div>
                 </div>
-              )}
-              {llmResult.llm_error && <div className="text-xs text-amber-300">LLM fallback: {llmResult.llm_error}</div>}
+              ) : null}
+              {llmResult?.llm_error && <div className="text-xs text-amber-300">LLM fallback: {llmResult.llm_error}</div>}
             </div>
           )}
-
+          </>
+          )}
         </section>
         )}
 
         {(results.length > 0 || deepProfiles.length > 0) && (
-        <section className="space-y-3" ref={exportSectionRef}>
-          <div className="flex items-center justify-between">
-            <h2 className="text-xl font-semibold">Export</h2>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={previewExport}
-                disabled={!results.length && !deepProfiles.length}
-                className="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm disabled:opacity-50"
-                style={{ backgroundColor: palette.panelDark, border: `1px solid ${palette.border}`, color: palette.light }}
-              >
-                <Eye className="w-4 h-4" /> Preview
-              </button>
-              <button
-                onClick={exportJson}
-                disabled={!results.length && !deepProfiles.length}
-                className="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm disabled:opacity-50"
-                style={{ backgroundColor: palette.panelDark, border: `1px solid ${palette.border}`, color: palette.light }}
-              >
-                <Download className="w-4 h-4" /> {exporting ? "Exporting..." : "Export JSON"}
-              </button>
-              <button
-                onClick={exportHtml}
-                disabled={!results.length && !deepProfiles.length}
-                className="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm disabled:opacity-50"
-                style={{ backgroundColor: palette.panelDark, border: `1px solid ${palette.border}`, color: palette.light }}
-              >
-                <FileText className="w-4 h-4" /> {exportingHtml ? "Exporting..." : "Export HTML"}
-              </button>
-            </div>
+          <section className="space-y-3 rounded-xl border" ref={exportSectionRef} style={{ borderColor: palette.border }}>
+          <div className="flex items-center justify-between py-3" style={{ minHeight: 88, paddingRight: 15 }}>
+            <button
+              onClick={() => setExportCollapsed((v) => !v)}
+              className="flex items-center gap-2 text-left"
+              aria-expanded={!exportCollapsed}
+            >
+              <ChevronDown className={`w-5 h-5 transition-transform ${exportCollapsed ? "-rotate-90" : "rotate-0"}`} />
+              <h2 className="text-xl font-semibold">Export</h2>
+            </button>
+            <div />
           </div>
-        </section>
+
+          {!exportCollapsed && (
+            <div
+              className="flex flex-col items-start gap-3 text-left pb-4 px-4 rounded-lg border"
+              style={{ backgroundColor: palette.panel, borderColor: palette.border }}
+            >
+              <div className="w-full flex items-center justify-between gap-4 text-left" style={{ marginTop: 15 }}>
+                <div className="text-sm leading-snug" style={{ color: "#facc15" }}>
+                  All data exported here is under the responsibility of the user, not the developer.
+                </div>
+                <div className="flex items-center gap-3 justify-end">
+                  <button
+                    onClick={previewExport}
+                    disabled={!results.length && !deepProfiles.length}
+                    className="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm disabled:opacity-50 whitespace-nowrap"
+                    style={{ backgroundColor: "#065f46", border: "1px solid #0f9f6c", color: "#e6fff4" }}
+                  >
+                    <Eye className="w-4 h-4" /> Preview
+                  </button>
+                  <button
+                    onClick={exportJson}
+                    disabled={!results.length && !deepProfiles.length || exporting}
+                    className="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm disabled:opacity-50 whitespace-nowrap"
+                    style={{ backgroundColor: "#065f46", border: "1px solid #0f9f6c", color: "#e6fff4" }}
+                  >
+                    <Download className="w-4 h-4" /> {exporting ? "Exporting..." : "Export JSON"}
+                  </button>
+                  <button
+                    onClick={exportHtml}
+                    disabled={!results.length && !deepProfiles.length || exportingHtml}
+                    className="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm disabled:opacity-50 whitespace-nowrap"
+                    style={{ backgroundColor: "#065f46", border: "1px solid #0f9f6c", color: "#e6fff4" }}
+                  >
+                    <FileText className="w-4 h-4" /> {exportingHtml ? "Exporting..." : "Export HTML"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+          </section>
         )}
       </div>
 
@@ -1538,7 +1806,7 @@ export default function Home() {
             >
               ×
             </button>
-            <h3 className="text-lg font-semibold mb-4">Analyzer settings</h3>
+            <h3 className="text-lg font-semibold mb-4">Analyser settings</h3>
             <div className="space-y-4 text-sm">
               <label className="flex items-center gap-2">
                 <input type="checkbox" checked={useLLM} onChange={(e) => setUseLLM(e.target.checked)} className="accent-purple-500" />
@@ -1644,7 +1912,7 @@ export default function Home() {
             </button>
             <div className="flex items-center gap-3 mb-3">
               <div className="w-14 h-14 rounded-full flex items-center justify-center" style={{ backgroundColor: palette.panelDark, border: `1px solid ${palette.border}` }}>
-                <Image src={logo} alt="deepkrak3n logo" className="rounded-full" style={{ width: 44, height: 44 }} />
+                <Image src={logo} alt="deepkrak3n logo" className="rounded-full" width={44} height={44} />
               </div>
               <div>
                 <div className="text-lg font-semibold" style={{ color: palette.light }}>deepkrak3n</div>
@@ -1656,6 +1924,18 @@ export default function Home() {
 
             <div className="text-sm whitespace-pre-wrap mb-3" style={{ color: palette.light }}>
               {(() => {
+                const mode = activeBranch?.viewMode;
+                const cat = activeBranch?.category;
+
+                if (mode === "category") {
+                  const label = cat || "category";
+                  return `These profiles are grouped because they share the site category “${label}”.`;
+                }
+
+                if (mode === "likelihood") {
+                  return "These profiles are ranked as the most likely to belong to the same person based on the search pivots.";
+                }
+
                 if (activeBranch?.basis) {
                   const { type, value, note } = activeBranch.basis;
                   return `This branch exists because the profiles share ${type} “${value}”. ${note}`;
@@ -1665,26 +1945,41 @@ export default function Home() {
                 return "This branch connects profiles that reuse the searched username across platforms.";
               })()}
             </div>
-            <div className="text-xs" style={{ color: palette.light }}>Branch anchor: {activeBranch?.basis?.value || (connectBy === "email" ? email || "email pivot" : username || "username pivot")}</div>
+            <div className="text-xs" style={{ color: palette.light }}>
+              Branch anchor: {activeBranch?.basis?.value || activeBranch?.category || (connectBy === "email" ? email || "email pivot" : username || "username pivot")}
+            </div>
 
             {activeBranch && (
               <div className="mt-4 space-y-2">
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  {activeBranch.nodes.map((node, idx) => (
-                    <div
-                      key={`${activeBranch.label}-${node.platform}-${idx}`}
-                      className="p-5 rounded-2xl border flex items-start gap-4"
-                      style={{ backgroundColor: palette.panelDark, borderColor: palette.border, minHeight: 180 }}
-                    >
-                      <img src={node.avatar} alt={`${node.platform} avatar`} className="w-14 h-14 rounded-full" style={{ backgroundColor: palette.bg }} />
-                      <div className="min-w-0 space-y-1">
-                        <div className="font-semibold text-base leading-tight" style={{ color: palette.light }}>{node.displayName}</div>
-                        <div className="text-sm" style={{ color: palette.light }}>{node.platform}</div>
-                        {node.category && <div className="text-xs text-gray-400">{node.category}</div>}
-                        {node.bio && <div className="text-sm text-gray-300 mt-1 leading-snug line-clamp-4">{node.bio}</div>}
+                <div className="max-h-[60vh] overflow-y-auto pr-1">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    {activeBranch.nodes.map((node, idx) => (
+                      <div
+                        key={`${activeBranch.label}-${node.platform}-${idx}`}
+                        className="p-5 rounded-2xl border flex items-start gap-4"
+                        style={{ backgroundColor: palette.panelDark, borderColor: palette.border, minHeight: 180 }}
+                      >
+                        <img src={node.avatar} alt={`${node.platform} avatar`} className="w-14 h-14 rounded-full" style={{ backgroundColor: palette.bg }} />
+                        <div className="min-w-0 space-y-1">
+                          <div className="font-semibold text-base leading-tight" style={{ color: palette.light }}>{node.displayName}</div>
+                          <div className="text-sm" style={{ color: palette.light }}>{node.platform}</div>
+                          {node.category && <div className="text-xs text-gray-400">{node.category}</div>}
+                          {node.url && (
+                            <a
+                              href={node.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-xs underline"
+                              style={{ color: palette.light }}
+                            >
+                              Open profile
+                            </a>
+                          )}
+                          {node.bio && <div className="text-sm text-gray-300 mt-1 leading-snug line-clamp-4">{node.bio}</div>}
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
                 </div>
               </div>
             )}
@@ -1729,7 +2024,17 @@ export default function Home() {
         </button>
       )}
 
-      <footer className="mt-12" style={{ height: 100, flexShrink: 0 }}>
+      <footer
+        className="mt-12"
+        style={{
+          height: 100,
+          flexShrink: 0,
+          // Stretch footer visuals to full viewport width, compensating for the page padding
+          marginLeft: "calc(50% - 50vw)",
+          marginRight: "calc(50% - 50vw)",
+          width: "100vw",
+        }}
+      >
         <div style={{ position: "relative", height: "100%", overflow: "hidden", background: palette.bg }}>
           <svg
             viewBox="0 0 150 40"
@@ -1781,7 +2086,21 @@ export default function Home() {
           <div
             style={{ position: "relative", zIndex: 1, height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: palette.light, fontSize: 12 }}
           >
-            deepkrak3n is an educational OSINT app for profile analysis; public data only, nothing stored locally.
+            <div className="flex items-center gap-4 text-center sm:text-left">
+              <Image src="/favicon-64.png" alt="deepkrak3n logo" width={48} height={48} className="flex-shrink-0" />
+              <div className="flex flex-col items-start gap-1">
+                <div>deepkrak3n is an educational OSINT app for profile analysis; public data only, nothing stored locally.</div>
+                <a
+                  href="https://github.com/guilhermelimait/deepkrak3n"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-2 text-sm hover:underline"
+                  style={{ color: palette.light }}
+                >
+                  <span>View the project on GitHub</span>
+                </a>
+              </div>
+            </div>
           </div>
         </div>
       </footer>

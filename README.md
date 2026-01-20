@@ -1,4 +1,4 @@
-# deepkrak3n (v3) — OSINT Profile Analyzer
+# deepkrak3n (v3) — OSINT Profile Search and Analysis
 
 <p align="center">
   <a href="@guilhermelimait/deepkrak3n/files/deepkrak3nlogo.png" target="_blank">
@@ -32,7 +32,7 @@
 
 ## What is deepkrak3n?
 
-deepkrak3n is a **fully local, modern OSINT platform** for scanning and analyzing public profiles across **200+ platforms** by username or email. It provides more than just a list: it builds relationships between accounts, leverages AI for summary and risk analysis, and gives you a clean, fast, and private user experience. Developed for educational and research purposes, it respects privacy and runs with no external data storage.
+deepkrak3n is a **fully local, modern OSINT platform** for scanning and analysing public profiles across **200+ platforms** by username or email. It provides more than just a list: it builds relationships between accounts, leverages AI for summary and risk analysis, and gives you a clean, fast, and private user experience. Developed for educational and research purposes, it respects privacy and runs with no external data storage.
 
 ---
 
@@ -62,7 +62,7 @@ deepkrak3n is a **fully local, modern OSINT platform** for scanning and analyzin
 - **Live Results:** Streaming scans show results as they are found—no need to wait for entire scan to finish.
 - **Smart Profile Cards:** Each hit includes display name, bio, avatar, real-time status, and summaries.
 - **AI/LLM Analysis:** Employs both classic heuristics and local/remote AI (Ollama, OpenAI, LLMs) for deep persona summaries, traits, and risk assessment.
-- **Export & Sharing:** Securely export your findings as JSON or standalone HTML for further investigations or reporting.
+- **Export & Sharing:** Export findings as **JSON** or **standalone HTML** (styled, offline-ready). Export CTA is always available from the LLM header and the export block keeps a visible disclaimer.
 - **Simple UX:** Minimalistic, modern interface (Next.js), dark mode, keyboard navigation, hot-reloading.
 - **Privacy First:** No cached history, no account registration, everything runs on your machine.
 - **Instant Filtering:** Results filter/search as you type, with highlight for risky/interesting hits.
@@ -89,6 +89,8 @@ deepkrak3n is a **fully local, modern OSINT platform** for scanning and analyzin
 - **LLM Persona Analysis:** Summarize an online identity across platforms with the power of AI—offline (Ollama) or API-powered (OpenAI).
 - **Historical Hinting:** While no data is retained, you can manually compare export snapshots for changes over time.
 
+**Supported export formats:** JSON (structured, machine-friendly) and HTML (read-only, portable, includes summaries/traits/risks).
+
 ---
 
 ## Improvements Over Original
@@ -99,8 +101,18 @@ deepkrak3n is a **fully local, modern OSINT platform** for scanning and analyzin
 - **Performance:** Faster scanning/UI updates, less memory usage, improved concurrency.
 - **Privacy & Simplicity:** All proxy code removed (unlike earlier versions), simplified setup, no dependencies outside your system unless you enable optional LLM.
 - **Better Exports:** Exports now include full visuals and clean formatting for sharing, no PII or scan logs are stored.
-- **Customizable Everything:** Both platform list and analyzer rules can be adjusted on-the-fly—no deeper changes required.
+- **Customizable Everything:** Both platform list and analysis rules can be adjusted on-the-fly—no deeper changes required.
 - **Accessibility:** Improved keyboard controls and screen reader compatibility.
+
+---
+
+## Recent UI updates (Jan 2026)
+
+- **Consistent phase CTAs:** All “Next phase” buttons share one size (240×42) and styling for predictable layout.
+- **Export CTA persistence:** The export button stays visible in the LLM header even when collapsed.
+- **Export panel polish:** Disclaimer text matches button size; green export buttons; aligned left text with right-aligned buttons; added top spacing and panel background/border.
+- **LLM controls layout:** Heuristic and LLM run buttons live inside their summaries; settings button sits beside the LLM run CTA; combined Heuristic+LLM runner available from Deep Analysis.
+- **Collapsible clarity:** Sections keep headers readable and action buttons accessible regardless of collapse state.
 
 ---
 
@@ -163,7 +175,7 @@ If your backend is not at `http://localhost:8000`, set env `NEXT_PUBLIC_API_BASE
 
 - **Add/Remove Platforms:** Edit [`data/platforms.json`](data/platforms.json).
 - **Switch AI Mode:** Ollama locally (`ollama pull smollm:latest`); OpenAI via API/key in settings.
-- **Customize Analyzer:** Change profile prompt logic in Settings.
+- **Customize Analysis:** Change profile prompt logic in Settings.
 - **Themes & Layout:** Adjust via Tailwind config or settings panel.
 
 ---

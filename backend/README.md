@@ -20,6 +20,11 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 - CORS allows `http://localhost:3000` and `http://localhost:5173` by default; override with `CORS_ORIGINS` env var (comma-separated).
 - Site definitions live in `app/sites_database.py`; add more patterns as needed.
 
+## Frontend pairing / recent notes
+- Current frontend (Jan 2026) still consumes the same `/api/search/username` and `/api/search/username/stream` endpoints; no backend changes required for the latest UI updates (export flow, LLM controls, unified CTAs).
+- Exports (JSON/HTML) are generated on the client using the data returned here—no server-side export path is needed.
+- Optional: set `NEXT_PUBLIC_API_BASE` on the frontend if you serve this API anywhere other than `http://localhost:8000`.
+
 ## Proxy / Anonymity (optional)
 - Enable with `PROXY_ENABLED=true` and provide `PROXY_LIST` (comma-separated proxy URLs like `http://user:pass@ip:port`).
 - Rotation mode: `PROXY_ROTATION_MODE=round_robin` (default) or `random_healthy`.

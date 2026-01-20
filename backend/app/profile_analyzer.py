@@ -3,11 +3,20 @@ from __future__ import annotations
 import logging
 import os
 from typing import Any, Dict, List
+from pathlib import Path
 
 import httpx
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
+
+
+DEFAULT_PROMPT = (
+    "You are a concise profile analyst.\n"
+    "Given multi-platform profile hits, infer persona, interests, and risk signals.\n"
+    "Keep it under 140 words."
+)
+PROMPT_FILE = Path(__file__).resolve().parents[2] / "data" / "prompt_profile.txt"
 
 
 class ProfileInput(BaseModel):
@@ -30,9 +39,37 @@ class AnalyzeRequest(BaseModel):
     prompt: str | None = None
 
 
+def _dedupe_profiles(profiles: List[ProfileInput]) -> List[ProfileInput]:
+    seen = set()
+    unique: List[ProfileInput] = []
+    for p in profiles:
+        key = (p.platform.lower(), (p.url or p.display_name or "").lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(p)
+    return unique
+
+
+def _load_prompt_template(prompt_override: str | None) -> str:
+    """Return the prompt text, preferring a caller override, otherwise external file, else default."""
+    if prompt_override and prompt_override.strip():
+        return prompt_override.strip()
+
+    try:
+        content = PROMPT_FILE.read_text(encoding="utf-8").strip()
+        if content:
+            return content
+    except FileNotFoundError:
+        pass
+
+    return DEFAULT_PROMPT
+
+
 def _heuristic_analysis(profiles: List[ProfileInput]) -> Dict[str, Any]:
-    total = len(profiles)
-    platforms = [p.platform.lower() for p in profiles]
+    uniq_profiles = _dedupe_profiles(profiles)
+    total = len(uniq_profiles)
+    platforms = [p.platform.lower() for p in uniq_profiles]
     bios = [p.bio for p in profiles if p.bio]
 
     traits: List[str] = []
@@ -77,13 +114,9 @@ async def _ollama_analysis(
     email: str | None = None,
     prompt_override: str | None = None,
 ) -> tuple[str, str]:
-    prompt_lines = [
-        prompt_override.strip()
-    ] if prompt_override and prompt_override.strip() else [
-        "You are a concise profile analyst.",
-        "Given multi-platform profile hits, infer persona, interests, and risk signals.",
-        "Keep it under 140 words.",
-    ]
+    profiles = _dedupe_profiles(profiles)
+    timeout = httpx.Timeout(float(os.getenv("OLLAMA_TIMEOUT", "60")))
+    prompt_lines = [_load_prompt_template(prompt_override)]
     if username:
         prompt_lines.append(f"Username pivot: {username}")
     if email:
@@ -94,17 +127,24 @@ async def _ollama_analysis(
         if p.bio:
             line += f" | bio: {p.bio[:220]}"
         prompt_lines.append(line)
+    prompt_lines.append(
+        "Output a single concise paragraph (<100 words) summarizing persona, interests, and risk signals. "
+        "Plain text only—no code, no markdown, no lists, no URLs, no instructions, and no scraping guidance."
+    )
     prompt = "\n".join(prompt_lines)
 
     async def _call_generate() -> str:
         payload = {"model": model, "prompt": prompt, "stream": False}
         url = host.rstrip("/") + "/api/generate"
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()
             text = data.get("response") or data.get("data") or ""
-            return text.strip()
+            text = text.strip()
+            if not text:
+                raise ValueError("Ollama generate returned an empty response")
+            return text
 
     async def _call_chat() -> str:
         payload = {
@@ -116,14 +156,17 @@ async def _ollama_analysis(
             "temperature": 0.2,
         }
         url = host.rstrip("/") + "/v1/chat/completions"
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()
             choice = (data.get("choices") or [{}])[0]
             message = choice.get("message") or {}
             text = message.get("content") or ""
-            return text.strip()
+            text = text.strip()
+            if not text:
+                raise ValueError("Ollama chat returned an empty response")
+            return text
 
     # Try preferred mode, fallback to the other if 404/Not Found
     if api_mode == "openai":
@@ -145,7 +188,8 @@ async def _ollama_analysis(
 
 
 async def analyze_profiles(req: AnalyzeRequest) -> Dict[str, Any]:
-    base = _heuristic_analysis(req.profiles)
+    deduped = _dedupe_profiles(req.profiles)
+    base = _heuristic_analysis(deduped)
 
     if not req.use_llm:
         return base
@@ -156,7 +200,7 @@ async def analyze_profiles(req: AnalyzeRequest) -> Dict[str, Any]:
 
     try:
         llm_summary, used_mode = await _ollama_analysis(
-            req.profiles,
+            deduped,
             model,
             host,
             api_mode,
@@ -164,6 +208,15 @@ async def analyze_profiles(req: AnalyzeRequest) -> Dict[str, Any]:
             email=req.email,
             prompt_override=req.prompt,
         )
+        llm_summary = llm_summary.strip()
+        banned_markers = ["```", "import requests", "from bs4", "BeautifulSoup", "<table", "</table>"]
+        if not llm_summary:
+            raise ValueError("LLM returned an empty summary")
+        if any(marker.lower() in llm_summary.lower() for marker in banned_markers):
+            raise ValueError("LLM produced disallowed content (code/HTML)")
+        # Once LLM succeeds, drop heuristic traits/risks so the UI doesn't show empty/irrelevant sections
+        base["traits"] = []
+        base["risks"] = []
         base.update(
             {
                 "summary": llm_summary or base["summary"],
@@ -175,12 +228,13 @@ async def analyze_profiles(req: AnalyzeRequest) -> Dict[str, Any]:
         )
     except Exception as exc:  # noqa: BLE001
         logger.exception("ollama analysis failed")
+        error_text = str(exc) or repr(exc)
         base.update(
             {
                 "mode": "heuristic_fallback",
                 "llm_used": False,
                 "llm_model": model,
-                "llm_error": str(exc),
+                "llm_error": error_text,
             }
         )
 

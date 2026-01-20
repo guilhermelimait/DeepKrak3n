@@ -14,10 +14,11 @@ import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
+from pydantic import BaseModel
 
 from .search_service import SearchService
 from .proxy_manager import ProxyManager
-from .profile_analyzer import AnalyzeRequest, analyze_profiles
+from .profile_analyzer import AnalyzeRequest, analyze_profiles, PROMPT_FILE
 
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -39,6 +40,10 @@ search_service = SearchService(
     backoff_base=float(os.getenv("PROXY_BACKOFF_BASE", "0.5")),
     proxy_manager=proxy_manager,
 )
+
+
+class PromptUpdate(BaseModel):
+    prompt: str
 
 
 @app.get("/health")
@@ -168,6 +173,20 @@ async def profile_analyze(req: AnalyzeRequest):
     except Exception as e:  # noqa: BLE001
         logger.exception("profile analysis failed")
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/api/prompt")
+async def save_prompt(body: PromptUpdate):
+    text = (body.prompt or "").strip("\ufeff")  # drop BOM if pasted
+    if text == "":
+        raise HTTPException(status_code=400, detail="prompt cannot be empty")
+    try:
+        PROMPT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        PROMPT_FILE.write_text(text, encoding="utf-8")
+        return {"saved": True, "bytes": len(text), "path": str(PROMPT_FILE)}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("failed to save prompt")
+        raise HTTPException(status_code=500, detail=f"Failed to save prompt: {exc}") from exc
 
 
 @app.get("/api/ollama/models")
