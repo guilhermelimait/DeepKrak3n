@@ -1,6 +1,4 @@
 
-# deepkrak3n
-
 <div align="center">
    <h1 style="margin-bottom: 4px; font-size: 2.6rem;">deepkrak3n</h1>
    <h3 style="margin-top: 0; font-weight: 500;">OSINT Profile Search and Analysis</h3>
